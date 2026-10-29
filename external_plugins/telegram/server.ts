@@ -43,6 +43,9 @@ try {
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === 'static'
+// Bot API base URL. Override only for a local Bot API server or the test
+// harness's fake API; the default is Telegram's public endpoint.
+const API_ROOT = (process.env.TELEGRAM_API_ROOT ?? 'https://api.telegram.org').replace(/\/+$/, '')
 
 if (!TOKEN) {
   process.stderr.write(
@@ -92,7 +95,7 @@ process.on('uncaughtException', err => {
 // Strict: no bare yes/no (conversational), no prefix/suffix chatter.
 const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
-const bot = new Bot(TOKEN)
+const bot = new Bot(TOKEN, { client: { apiRoot: API_ROOT } })
 let botUsername = ''
 
 type PendingEntry = {
@@ -607,7 +610,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const file_id = args.file_id as string
         const file = await bot.api.getFile(file_id)
         if (!file.file_path) throw new Error('Telegram returned no file_path — file may have expired')
-        const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+        const url = `${API_ROOT}/file/bot${TOKEN}/${file.file_path}`
         const res = await fetch(url)
         if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
         const buf = Buffer.from(await res.arrayBuffer())
@@ -806,7 +809,7 @@ bot.on('message:photo', async ctx => {
     try {
       const file = await ctx.api.getFile(best.file_id)
       if (!file.file_path) return undefined
-      const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+      const url = `${API_ROOT}/file/bot${TOKEN}/${file.file_path}`
       const res = await fetch(url)
       const buf = Buffer.from(await res.arrayBuffer())
       const ext = file.file_path.split('.').pop() ?? 'jpg'
