@@ -19,7 +19,7 @@ export type ApiCall = {
   method: string
   /** JSON body fields, or multipart text fields (objects are JSON-decoded). */
   params: Record<string, any>
-  /** Multipart file fields: name → { filename, size }. */
+  /** Uploaded files keyed by the parameter that attaches them (photo, document). */
   files: Record<string, { filename: string; size: number }>
 }
 
@@ -122,7 +122,15 @@ async function parseBody(req: Request): Promise<Pick<ApiCall, 'params' | 'files'
   } else if (type.includes('json')) {
     Object.assign(params, await req.json())
   }
-  return { params, files }
+  // grammy uploads as `photo: "attach://<id>"` plus a part named <id>;
+  // key the file by the parameter that references it.
+  const byParam: ApiCall['files'] = {}
+  for (const [k, v] of Object.entries(params)) {
+    if (typeof v === 'string' && v.startsWith('attach://') && files[v.slice(9)]) {
+      byParam[k] = files[v.slice(9)]
+    }
+  }
+  return { params, files: byParam }
 }
 
 // Multipart fields arrive as strings; objects/arrays/numbers/booleans are JSON.
