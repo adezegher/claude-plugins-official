@@ -400,6 +400,51 @@ function threadIdArg(v: unknown): number | undefined {
   return n
 }
 
+// Inline keyboard from the buttons arg: rows of { text, callback_data }.
+// Telegram caps callback_data at 64 bytes. The perm: prefix is reserved for
+// permission prompts — a button carrying it would be handled as an allow/deny
+// answer, so the assistant must not be able to mint one.
+type InlineButton = { text: string; callback_data: string }
+const MAX_CALLBACK_DATA_BYTES = 64
+
+function keyboardArg(v: unknown): { inline_keyboard: InlineButton[][] } | undefined {
+  if (v == null) return undefined
+  if (!Array.isArray(v)) throw new Error('buttons must be an array of rows')
+  const rows = v.map((row, i) => {
+    if (!Array.isArray(row) || row.length === 0) {
+      throw new Error(`buttons[${i}] must be a non-empty array of buttons`)
+    }
+    return row.map((b, j): InlineButton => {
+      const where = `buttons[${i}][${j}]`
+      const text = (b as Partial<InlineButton> | null)?.text
+      const data = (b as Partial<InlineButton> | null)?.callback_data
+      if (typeof text !== 'string' || text === '') throw new Error(`${where}.text is required`)
+      if (typeof data !== 'string' || data === '') throw new Error(`${where}.callback_data is required`)
+      if (Buffer.byteLength(data) > MAX_CALLBACK_DATA_BYTES) {
+        throw new Error(`${where}.callback_data exceeds ${MAX_CALLBACK_DATA_BYTES} bytes`)
+      }
+      if (data.startsWith('perm:')) throw new Error(`${where}.callback_data may not start with "perm:"`)
+      return { text, callback_data: data }
+    })
+  })
+  return { inline_keyboard: rows }
+}
+
+const BUTTONS_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Button label.' },
+        callback_data: { type: 'string', description: 'Opaque id returned when pressed, max 64 bytes. Must not start with "perm:".' },
+      },
+      required: ['text', 'callback_data'],
+    },
+  },
+}
+
 const mcp = new Server(
   { name: 'telegram', version: '1.0.0' },
   {
@@ -419,6 +464,8 @@ const mcp = new Server(
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
       'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. Messages posted in a forum topic also carry message_thread_id (and is_topic_message="true"); pass message_thread_id back to reply so the answer lands in the same topic. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      '',
+      'reply accepts buttons (rows of {text, callback_data}) to show an inline keyboard. A press arrives as a <channel> message with callback_data, message_id (the message holding the buttons) and, in a topic, message_thread_id; the press is acknowledged for you. To show the outcome, edit_message the message (edit without buttons removes them).',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
@@ -486,6 +533,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'boolean',
             description: 'Deliver silently: the message arrives without a sound or banner. Default false.',
           },
+          buttons: {
+            ...BUTTONS_SCHEMA,
+            description: 'Inline keyboard under the message: an array of rows, each an array of {text, callback_data}. Attached to the last text chunk.',
+          },
           files: {
             type: 'array',
             items: { type: 'string' },
@@ -538,6 +589,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             enum: ['text', 'markdownv2'],
             description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
           },
+          buttons: {
+            ...BUTTONS_SCHEMA,
+            description: 'Inline keyboard to show after the edit. Omit to remove any buttons the message had.',
+          },
         },
         required: ['chat_id', 'message_id', 'text'],
       },
@@ -555,6 +610,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const thread_id = threadIdArg(args.message_thread_id)
         const silent = args.disable_notification === true
+        const keyboard = keyboardArg(args.buttons)
         const files = (args.files as string[] | undefined) ?? []
         const format = (args.format as string | undefined) ?? 'text'
         const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
@@ -587,6 +643,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               ...(thread_id != null ? { message_thread_id: thread_id } : {}),
               ...(silent ? { disable_notification: true } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
+              ...(keyboard && i === chunks.length - 1 ? { reply_markup: keyboard } : {}),
             })
             sentIds.push(sent.message_id)
           }
@@ -651,11 +708,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         assertAllowedChat(args.chat_id as string)
         const editFormat = (args.format as string | undefined) ?? 'text'
         const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const editKeyboard = keyboardArg(args.buttons)
+        const editOpts = {
+          ...(editParseMode ? { parse_mode: editParseMode } : {}),
+          ...(editKeyboard ? { reply_markup: editKeyboard } : {}),
+        }
         const edited = await bot.api.editMessageText(
           args.chat_id as string,
           Number(args.message_id),
           args.text as string,
-          ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
+          ...(Object.keys(editOpts).length ? [editOpts] : []),
         )
         const id = typeof edited === 'object' ? edited.message_id : args.message_id
         return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
@@ -765,7 +827,7 @@ bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
   const m = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(data)
   if (!m) {
-    await ctx.answerCallbackQuery().catch(() => {})
+    await handleButton(ctx)
     return
   }
   const access = loadAccess()
@@ -816,6 +878,69 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText(`${msg.text}\n\n${label}`).catch(() => {})
   }
 })
+
+// Presses on buttons the assistant sent (reply/edit_message buttons). Gated
+// like an inbound message from the same chat, minus pairing and mentions:
+// DMs need the sender in allowFrom; groups must be enabled and, if the group
+// has its own allowFrom, the sender must be in it. Every press is answered so
+// the client stops spinning; only allowed presses reach the session.
+function buttonAllowed(ctx: Context): boolean {
+  const access = loadAccess()
+  if (access.dmPolicy === 'disabled') return false
+  const chat = ctx.callbackQuery?.message?.chat
+  if (!chat || !ctx.from) return false
+  const senderId = String(ctx.from.id)
+  if (chat.type === 'private') return access.allowFrom.includes(senderId)
+  if (chat.type === 'group' || chat.type === 'supergroup') {
+    const policy = access.groups[String(chat.id)]
+    if (!policy) return false
+    const groupAllowFrom = policy.allowFrom ?? []
+    return groupAllowFrom.length === 0 || groupAllowFrom.includes(senderId)
+  }
+  return false
+}
+
+async function handleButton(ctx: Context): Promise<void> {
+  if (!buttonAllowed(ctx)) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+  await ctx.answerCallbackQuery().catch(() => {})
+
+  const cq = ctx.callbackQuery!
+  const from = cq.from
+  const msg = cq.message!
+  const data = cq.data ?? ''
+  // An old message can come back as InaccessibleMessage (date 0, no fields).
+  const full = msg.date !== 0 ? (msg as Extract<typeof msg, { date: number }> & {
+    message_thread_id?: number
+    is_topic_message?: boolean
+    reply_markup?: { inline_keyboard: { text: string; callback_data?: string }[][] }
+  }) : undefined
+  const label = full?.reply_markup?.inline_keyboard.flat().find(b => b.callback_data === data)?.text
+  const threadId = full?.message_thread_id
+  const isTopic = full?.is_topic_message === true
+
+  mcp.notification({
+    method: 'notifications/claude/channel',
+    params: {
+      content: `(button: ${label ?? data})`,
+      meta: {
+        chat_id: String(msg.chat.id),
+        message_id: String(msg.message_id),
+        ...(threadId != null ? { message_thread_id: String(threadId) } : {}),
+        ...(isTopic ? { is_topic_message: 'true' } : {}),
+        user: from.username ?? String(from.id),
+        user_id: String(from.id),
+        ts: new Date().toISOString(),
+        callback_data: safeName(data)!,
+        ...(label ? { button_text: safeName(label)! } : {}),
+      },
+    },
+  }).catch(err => {
+    process.stderr.write(`telegram channel: failed to deliver button press to Claude: ${err}\n`)
+  })
+}
 
 bot.on('message:text', async ctx => {
   await handleInbound(ctx, ctx.message.text, undefined)

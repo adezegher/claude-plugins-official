@@ -156,3 +156,135 @@ describe('silent delivery', () => {
     expect(h.api.callsTo('sendMessage')[0].params.disable_notification).toBeUndefined()
   })
 })
+
+describe('inline buttons', () => {
+  const buttons = [
+    [{ text: 'Approve', callback_data: 'appr:17:yes' }, { text: 'Decline', callback_data: 'appr:17:no' }],
+    [{ text: 'Later', callback_data: 'appr:17:later' }],
+  ]
+
+  test('reply renders buttons as inline_keyboard on the last chunk only', async () => {
+    const res = await h.call('reply', { chat_id: ALEC, text: 'z'.repeat(5000), buttons })
+    expect(res.isError).toBe(false)
+    const [first, last] = h.api.callsTo('sendMessage')
+    expect(first.params.reply_markup).toBeUndefined()
+    expect(last.params.reply_markup).toEqual({ inline_keyboard: buttons })
+  })
+
+  test('edit_message can replace buttons, and omitting them sends no markup', async () => {
+    await h.call('edit_message', { chat_id: ALEC, message_id: '5', text: 'v2', buttons: [[buttons[1][0]]] })
+    await h.call('edit_message', { chat_id: ALEC, message_id: '5', text: 'done' })
+    const [withButtons, without] = h.api.callsTo('editMessageText')
+    expect(withButtons.params.reply_markup).toEqual({ inline_keyboard: [[buttons[1][0]]] })
+    expect(without.params.reply_markup).toBeUndefined()
+  })
+
+  test('invalid buttons are rejected before anything is sent', async () => {
+    const cases = [
+      [[{ text: 'x', callback_data: 'd'.repeat(65) }]],
+      [[{ text: 'x', callback_data: 'perm:allow:abcde' }]],
+      [[{ text: '', callback_data: 'ok' }]],
+      [[]],
+      'not-an-array',
+    ]
+    for (const b of cases) {
+      const res = await h.call('reply', { chat_id: ALEC, text: 'x', buttons: b })
+      expect(res.isError).toBe(true)
+    }
+    expect(h.api.sends()).toHaveLength(0)
+  })
+
+  test('buttons do not open a chat outside the allowlist', async () => {
+    const res = await h.call('reply', { chat_id: STRANGER, text: 'x', buttons })
+    expect(res.isError).toBe(true)
+    expect(h.api.sends()).toHaveLength(0)
+  })
+
+  test('a press in a topic reaches the session and is answered', async () => {
+    h.api.push({
+      callback_query: {
+        id: 'cb-1',
+        from: { id: Number(ALEC), is_bot: false, first_name: 'Alec', username: 'alec' },
+        chat_instance: 'x',
+        data: 'appr:17:yes',
+        message: {
+          message_id: 321,
+          date: Math.floor(Date.now() / 1000),
+          chat: { id: Number(GROUP), type: 'supergroup', is_forum: true },
+          message_thread_id: 7,
+          is_topic_message: true,
+          text: 'Pay the Marriott folio?',
+          reply_markup: { inline_keyboard: buttons },
+        },
+      },
+    })
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.meta?.callback_data))
+    expect(n.method).toBe('notifications/claude/channel')
+    expect(n.params.content).toBe('(button: Approve)')
+    expect(n.params.meta).toMatchObject({
+      chat_id: GROUP,
+      message_id: '321',
+      message_thread_id: '7',
+      is_topic_message: 'true',
+      user: 'alec',
+      user_id: ALEC,
+      callback_data: 'appr:17:yes',
+      button_text: 'Approve',
+    })
+    const [answer] = await h.waitFor(() => {
+      const a = h.api.callsTo('answerCallbackQuery')
+      return a.length ? a : undefined
+    })
+    expect(answer.params.callback_query_id).toBe('cb-1')
+    expect(answer.params.text).toBeUndefined()
+  })
+
+  test('a press in a DM from an allowlisted user is delivered', async () => {
+    h.api.push({
+      callback_query: {
+        id: 'cb-2',
+        from: { id: Number(ALEC), is_bot: false, first_name: 'Alec', username: 'alec' },
+        chat_instance: 'x',
+        data: 'brief:more',
+        message: { message_id: 9, date: 1, chat: { id: Number(ALEC), type: 'private' }, text: 'Brief' },
+      },
+    })
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.meta?.callback_data === 'brief:more'))
+    expect(n.params.content).toBe('(button: brief:more)')
+    expect(n.params.meta.message_thread_id).toBeUndefined()
+  })
+
+  test('a press from someone outside the allowlist is answered but not delivered', async () => {
+    h.api.push({
+      callback_query: {
+        id: 'cb-3',
+        from: { id: Number(STRANGER), is_bot: false, first_name: 'Eve' },
+        chat_instance: 'x',
+        data: 'appr:17:yes',
+        message: { message_id: 10, date: 1, chat: { id: Number(STRANGER), type: 'private' }, text: 'x' },
+      },
+    })
+    const [answer] = await h.waitFor(() => {
+      const a = h.api.callsTo('answerCallbackQuery')
+      return a.length ? a : undefined
+    })
+    expect(answer.params.text).toBe('Not authorized.')
+    await Bun.sleep(100)
+    expect(h.notifications.find(n => n.params?.meta?.callback_data)).toBeUndefined()
+  })
+
+  test('a press in a group that is not enabled is not delivered', async () => {
+    h.api.push({
+      callback_query: {
+        id: 'cb-4',
+        from: { id: Number(ALEC), is_bot: false, first_name: 'Alec' },
+        chat_instance: 'x',
+        data: 'appr:17:yes',
+        message: { message_id: 11, date: 1, chat: { id: -100999, type: 'supergroup' }, text: 'x' },
+      },
+    })
+    await h.waitFor(() => h.api.callsTo('answerCallbackQuery').length > 0)
+    await Bun.sleep(100)
+    expect(h.notifications.find(n => n.params?.meta?.callback_data)).toBeUndefined()
+  })
+})
