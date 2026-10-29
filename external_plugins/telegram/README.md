@@ -73,9 +73,22 @@ Quick reference: IDs are **numeric user IDs** (get yours from [@userinfobot](htt
 
 | Tool | Purpose |
 | --- | --- |
-| `reply` | Send to a chat. Takes `chat_id` + `text`, optionally `reply_to` (message ID) for native threading and `files` (absolute paths) for attachments. Images (`.jpg`/`.png`/`.gif`/`.webp`) send as photos with inline preview; other types send as documents. Max 50MB each. Auto-chunks text; files send as separate messages after the text. Returns the sent message ID(s). |
+| `reply` | Send to a chat. Takes `chat_id` + `text`, optionally `reply_to` (message ID) for native threading, `message_thread_id` to post in a forum topic, `disable_notification` for silent delivery, `buttons` for an inline keyboard, and `files` (absolute paths) for attachments. Images (`.jpg`/`.png`/`.gif`/`.webp`) send as photos with inline preview; other types send as documents. Max 50MB each. Auto-chunks text (buttons go on the last chunk); files send as separate messages after the text. Returns the sent message ID(s). |
+| `send_file` | Send one local file as a photo or document. Takes `chat_id` + `path`, optionally `caption`, `format`, `as` (`photo` \| `document`), `reply_to`, `message_thread_id`, `disable_notification`, `buttons`. Only reads from `TELEGRAM_FILE_ROOTS` (colon-separated directories, default `~/.james`); symlinks and `..` cannot escape. |
 | `react` | Add an emoji reaction to a message by ID. **Only Telegram's fixed whitelist** is accepted (👍 👎 ❤ 🔥 👀 etc). |
-| `edit_message` | Edit a message the bot previously sent. Useful for "working…" → result progress updates. Only works on the bot's own messages. |
+| `edit_message` | Edit a message the bot previously sent. Useful for "working…" → result progress updates. Only works on the bot's own messages. Optional `buttons` keeps or replaces the inline keyboard; without it the keyboard is removed. |
+
+Every sending tool refuses chats outside `allowFrom` and `groups`.
+
+## Forum topics and buttons
+
+Messages posted in a forum topic carry `message_thread_id` (and `is_topic_message="true"`) in the `<channel>` tag; pass it back to `reply` or `send_file` to answer in the same topic. Without it, a send to a forum group lands in General.
+
+`buttons` is an array of rows, each an array of `{ "text": "...", "callback_data": "..." }` (`callback_data` at most 64 bytes, not starting with `perm:`, which is reserved for permission prompts). A press is answered right away (`answerCallbackQuery`) and, if the presser passes the same gate as an inbound message from that chat, delivered as a `<channel>` event whose content is `(button: <label>)` and whose meta has `callback_data`, `button_text`, `message_id` (the message holding the buttons), `message_thread_id` when in a topic, `user` and `user_id`.
+
+## Tests
+
+`bun test` runs the server against an in-process fake Bot API (`test/harness.ts`) through a real MCP stdio client. `TELEGRAM_API_ROOT` (default `https://api.telegram.org`) is what points the server at the fake.
 
 Inbound messages trigger a typing indicator automatically — Telegram shows
 "botname is typing…" while the assistant works on a response.
