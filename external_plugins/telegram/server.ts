@@ -22,7 +22,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
-import { join, extname, sep } from 'path'
+import { join, extname, sep, delimiter, isAbsolute } from 'path'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR
   ?? join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'channels', 'telegram')
@@ -139,6 +139,18 @@ function defaultAccess(): Access {
 
 const MAX_CHUNK_LIMIT = 4096
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024 // Bot API limit for sendPhoto
+const MAX_CAPTION_CHARS = 1024
+
+// send_file reads only from these directories. Default ~/.james; override with
+// TELEGRAM_FILE_ROOTS (shell or .env), a colon-separated list of directories.
+// Unlike reply's files param, send_file is meant to be the only way out for
+// files, so it is confined to directories the operator chose.
+const FILE_ROOTS = (process.env.TELEGRAM_FILE_ROOTS ?? join(homedir(), '.james'))
+  .split(delimiter)
+  .map(p => p.trim())
+  .filter(Boolean)
+  .map(p => (p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p))
 
 // reply's files param takes any path. .env is ~60 bytes and ships as a
 // document. Claude can already Read+paste file contents, so this isn't a new
@@ -154,6 +166,28 @@ function assertSendable(f: string): void {
   if (real.startsWith(stateReal + sep) && !real.startsWith(inbox + sep)) {
     throw new Error(`refusing to send channel state: ${f}`)
   }
+}
+
+// Resolves symlinks before the prefix check, so a link inside a root that
+// points outside it is refused. Returns the resolved path to send.
+function assertUnderFileRoots(f: string): string {
+  if (!isAbsolute(f)) throw new Error(`path must be absolute: ${f}`)
+  let real: string
+  try {
+    real = realpathSync(f)
+  } catch {
+    throw new Error(`file not found: ${f}`)
+  }
+  for (const root of FILE_ROOTS) {
+    let rootReal: string
+    try {
+      rootReal = realpathSync(root)
+    } catch {
+      continue
+    }
+    if (real.startsWith(rootReal + sep)) return real
+  }
+  throw new Error(`refusing to send ${f}: not under ${FILE_ROOTS.join(', ')} (TELEGRAM_FILE_ROOTS)`)
 }
 
 function readAccessFile(): Access {
@@ -467,6 +501,8 @@ const mcp = new Server(
       '',
       'reply accepts buttons (rows of {text, callback_data}) to show an inline keyboard. A press arrives as a <channel> message with callback_data, message_id (the message holding the buttons) and, in a topic, message_thread_id; the press is acknowledged for you. To show the outcome, edit_message the message (edit without buttons removes them).',
       '',
+      'send_file sends one photo or document from a local path (with optional caption, message_thread_id, buttons); it only reads from the configured file roots.',
+      '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
       "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
@@ -549,6 +585,46 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ['chat_id', 'text'],
+      },
+    },
+    {
+      name: 'send_file',
+      description:
+        'Send one local file as a photo or document, with an optional caption. Only paths under the configured file roots (default ~/.james) are allowed. Images up to 10MB go as photos unless as is "document"; everything else as documents, max 50MB.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string' },
+          path: { type: 'string', description: 'Absolute path under a file root.' },
+          caption: { type: 'string', description: 'Shown under the file. Max 1024 characters.' },
+          as: {
+            type: 'string',
+            enum: ['photo', 'document'],
+            description: "Force photo (compressed, inline) or document (original file). Default: by extension and size.",
+          },
+          format: {
+            type: 'string',
+            enum: ['text', 'markdownv2'],
+            description: "Caption rendering mode. Default: 'text'.",
+          },
+          message_thread_id: {
+            type: 'string',
+            description: 'Forum topic to post in. Omit for the General topic or a non-forum chat.',
+          },
+          reply_to: {
+            type: 'string',
+            description: 'Message ID to thread under.',
+          },
+          disable_notification: {
+            type: 'boolean',
+            description: 'Deliver silently. Default false.',
+          },
+          buttons: {
+            ...BUTTONS_SCHEMA,
+            description: 'Inline keyboard under the file: an array of rows, each an array of {text, callback_data}.',
+          },
+        },
+        required: ['chat_id', 'path'],
       },
     },
     {
@@ -678,6 +754,43 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             ? `sent (id: ${sentIds[0]})`
             : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
         return { content: [{ type: 'text', text: result }] }
+      }
+      case 'send_file': {
+        const chat_id = args.chat_id as string
+        assertAllowedChat(chat_id)
+        const real = assertUnderFileRoots(String(args.path ?? ''))
+        assertSendable(real)
+        const st = statSync(real)
+        if (!st.isFile()) throw new Error(`not a file: ${args.path}`)
+        if (st.size > MAX_ATTACHMENT_BYTES) {
+          throw new Error(`file too large: ${args.path} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`)
+        }
+        const caption = args.caption as string | undefined
+        if (caption != null && caption.length > MAX_CAPTION_CHARS) {
+          throw new Error(`caption too long: ${caption.length} chars, max ${MAX_CAPTION_CHARS}`)
+        }
+        const as = args.as as 'photo' | 'document' | undefined
+        if (as === 'photo' && st.size > MAX_PHOTO_BYTES) {
+          throw new Error(`photo too large: ${(st.size / 1024 / 1024).toFixed(1)}MB, max 10MB — send as document`)
+        }
+        const asPhoto = as === 'photo' ||
+          (as == null && PHOTO_EXTS.has(extname(real).toLowerCase()) && st.size <= MAX_PHOTO_BYTES)
+        const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
+        const thread_id = threadIdArg(args.message_thread_id)
+        const keyboard = keyboardArg(args.buttons)
+        const opts = {
+          ...(caption ? { caption } : {}),
+          ...(caption && args.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}),
+          ...(reply_to != null ? { reply_parameters: { message_id: reply_to } } : {}),
+          ...(thread_id != null ? { message_thread_id: thread_id } : {}),
+          ...(args.disable_notification === true ? { disable_notification: true } : {}),
+          ...(keyboard ? { reply_markup: keyboard } : {}),
+        }
+        const input = new InputFile(real)
+        const sent = asPhoto
+          ? await bot.api.sendPhoto(chat_id, input, opts)
+          : await bot.api.sendDocument(chat_id, input, opts)
+        return { content: [{ type: 'text', text: `sent ${asPhoto ? 'photo' : 'document'} (id: ${sent.message_id})` }] }
       }
       case 'react': {
         assertAllowedChat(args.chat_id as string)

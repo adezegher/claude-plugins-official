@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { startHarness, textMessage, type Harness } from './harness'
@@ -19,10 +19,19 @@ const scratch = mkdtempSync(join(tmpdir(), 'tg-files-'))
 const PNG = join(scratch, 'pic.png')
 writeFileSync(PNG, Buffer.from('89504e470d0a1a0a', 'hex'))
 
+// send_file roots: ROOT holds sendable files; scratch (PNG) is outside it.
+const ROOT = join(scratch, 'root')
+mkdirSync(join(ROOT, 'out'), { recursive: true })
+const ROOT_PNG = join(ROOT, 'out', 'folio.png')
+const ROOT_PDF = join(ROOT, 'out', 'folio.pdf')
+writeFileSync(ROOT_PNG, Buffer.from('89504e470d0a1a0a', 'hex'))
+writeFileSync(ROOT_PDF, '%PDF-1.4 test')
+symlinkSync(PNG, join(ROOT, 'escape.png'))
+
 let h: Harness
 
 beforeAll(async () => {
-  h = await startHarness({ access })
+  h = await startHarness({ access, env: { TELEGRAM_FILE_ROOTS: `${ROOT}:/nonexistent-root` } })
 })
 afterAll(async () => {
   await h.close()
@@ -286,5 +295,105 @@ describe('inline buttons', () => {
     await h.waitFor(() => h.api.callsTo('answerCallbackQuery').length > 0)
     await Bun.sleep(100)
     expect(h.notifications.find(n => n.params?.meta?.callback_data)).toBeUndefined()
+  })
+})
+
+describe('send_file', () => {
+  test('sends an image under a root as a photo with caption, topic, silence and buttons', async () => {
+    const buttons = [[{ text: 'File it', callback_data: 'file:folio' }]]
+    const res = await h.call('send_file', {
+      chat_id: GROUP,
+      path: ROOT_PNG,
+      caption: 'Marriott folio',
+      message_thread_id: '9',
+      disable_notification: true,
+      buttons,
+    })
+    expect(res.isError).toBe(false)
+    expect(res.text).toContain('sent photo')
+    const [photo] = h.api.callsTo('sendPhoto')
+    expect(photo.files.photo).toEqual({ filename: 'folio.png', size: 8 })
+    expect(photo.params).toMatchObject({
+      chat_id: Number(GROUP),
+      caption: 'Marriott folio',
+      message_thread_id: 9,
+      disable_notification: true,
+      reply_markup: { inline_keyboard: buttons },
+    })
+  })
+
+  test('sends other files as documents', async () => {
+    const res = await h.call('send_file', { chat_id: ALEC, path: ROOT_PDF, caption: 'pdf' })
+    expect(res.text).toContain('sent document')
+    const [doc] = h.api.callsTo('sendDocument')
+    expect(doc.files.document.filename).toBe('folio.pdf')
+    expect(doc.params.caption).toBe('pdf')
+    expect(doc.params.message_thread_id).toBeUndefined()
+    expect(doc.params.disable_notification).toBeUndefined()
+  })
+
+  test('as: document keeps an image as the original file', async () => {
+    await h.call('send_file', { chat_id: ALEC, path: ROOT_PNG, as: 'document' })
+    expect(h.api.callsTo('sendDocument')).toHaveLength(1)
+    expect(h.api.callsTo('sendPhoto')).toHaveLength(0)
+  })
+
+  test('refuses paths outside the roots, traversal, symlink escapes and relative paths', async () => {
+    for (const path of [PNG, join(ROOT, '..', 'pic.png'), join(ROOT, 'escape.png'), 'root/out/folio.png', join(ROOT, 'nope.png')]) {
+      const res = await h.call('send_file', { chat_id: ALEC, path })
+      expect(res.isError).toBe(true)
+    }
+    expect(h.api.sends()).toHaveLength(0)
+  })
+
+  test('refuses a chat outside the allowlist even for an allowed file', async () => {
+    const res = await h.call('send_file', { chat_id: STRANGER, path: ROOT_PNG })
+    expect(res.isError).toBe(true)
+    expect(res.text).toContain('not allowlisted')
+    expect(h.api.sends()).toHaveLength(0)
+  })
+
+  test('refuses an over-long caption', async () => {
+    const res = await h.call('send_file', { chat_id: ALEC, path: ROOT_PDF, caption: 'c'.repeat(1025) })
+    expect(res.isError).toBe(true)
+    expect(h.api.sends()).toHaveLength(0)
+  })
+})
+
+describe('send_file default root', () => {
+  let d: Harness
+  const home = mkdtempSync(join(tmpdir(), 'tg-home-'))
+  const jamesFile = join(home, '.james', 'outbox', 'note.txt')
+
+  beforeAll(async () => {
+    mkdirSync(join(home, '.james', 'outbox'), { recursive: true })
+    writeFileSync(jamesFile, 'hello')
+    d = await startHarness({ access, env: { HOME: home } })
+  })
+  afterAll(async () => {
+    await d.close()
+  })
+
+  test('allows ~/.james and nothing else when TELEGRAM_FILE_ROOTS is unset', async () => {
+    const ok = await d.call('send_file', { chat_id: ALEC, path: jamesFile })
+    expect(ok.isError).toBe(false)
+    const bad = await d.call('send_file', { chat_id: ALEC, path: ROOT_PDF })
+    expect(bad.isError).toBe(true)
+    expect(bad.text).toContain('.james')
+    expect(d.api.sends()).toHaveLength(1)
+  })
+})
+
+describe('tool schemas', () => {
+  test('list the new parameters and the send_file tool', async () => {
+    const { tools } = await h.client.listTools()
+    const byName = Object.fromEntries(tools.map(t => [t.name, t.inputSchema as any]))
+    expect(Object.keys(byName).sort()).toEqual(['download_attachment', 'edit_message', 'react', 'reply', 'send_file'])
+    expect(Object.keys(byName.reply.properties)).toEqual(
+      expect.arrayContaining(['message_thread_id', 'disable_notification', 'buttons']),
+    )
+    expect(byName.reply.required).toEqual(['chat_id', 'text'])
+    expect(byName.edit_message.properties.buttons).toBeDefined()
+    expect(byName.send_file.required).toEqual(['chat_id', 'path'])
   })
 })
