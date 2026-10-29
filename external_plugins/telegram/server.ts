@@ -482,6 +482,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'string',
             description: 'Forum topic to post in. Use message_thread_id from the inbound <channel> block, or a known topic id. Omit for the General topic or a non-forum chat.',
           },
+          disable_notification: {
+            type: 'boolean',
+            description: 'Deliver silently: the message arrives without a sound or banner. Default false.',
+          },
           files: {
             type: 'array',
             items: { type: 'string' },
@@ -550,6 +554,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const text = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const thread_id = threadIdArg(args.message_thread_id)
+        const silent = args.disable_notification === true
         const files = (args.files as string[] | undefined) ?? []
         const format = (args.format as string | undefined) ?? 'text'
         const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
@@ -580,6 +585,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             const sent = await bot.api.sendMessage(chat_id, chunks[i], {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
               ...(thread_id != null ? { message_thread_id: thread_id } : {}),
+              ...(silent ? { disable_notification: true } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
             })
             sentIds.push(sent.message_id)
@@ -599,6 +605,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           const opts = {
             ...(reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}),
             ...(thread_id != null ? { message_thread_id: thread_id } : {}),
+            ...(silent ? { disable_notification: true } : {}),
           }
           if (PHOTO_EXTS.has(ext)) {
             const sent = await bot.api.sendPhoto(chat_id, input, opts)

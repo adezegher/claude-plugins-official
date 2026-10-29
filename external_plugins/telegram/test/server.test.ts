@@ -136,3 +136,23 @@ describe('forum topics', () => {
     expect(h.api.sends()).toHaveLength(0)
   })
 })
+
+describe('silent delivery', () => {
+  test('disable_notification reaches every chunk and file', async () => {
+    const res = await h.call('reply', {
+      chat_id: ALEC,
+      text: 'y'.repeat(5000),
+      disable_notification: true,
+      files: [PNG],
+    })
+    expect(res.isError).toBe(false)
+    const sends = h.api.sends()
+    expect(sends).toHaveLength(3)
+    for (const s of sends) expect(s.params.disable_notification).toBe(true)
+  })
+
+  test('sends notify by default', async () => {
+    await h.call('reply', { chat_id: ALEC, text: 'loud' })
+    expect(h.api.callsTo('sendMessage')[0].params.disable_notification).toBeUndefined()
+  })
+})
