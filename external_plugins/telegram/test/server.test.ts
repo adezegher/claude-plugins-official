@@ -146,6 +146,155 @@ describe('forum topics', () => {
   })
 })
 
+describe('quoted replies', () => {
+  const dm = { id: Number(ALEC), type: 'private' }
+  const forum = { id: Number(GROUP), type: 'supergroup', is_forum: true }
+
+  test("a reply to one of the bot's messages carries the quoted id, sender and text", async () => {
+    h.api.push(textMessage({
+      chat: dm,
+      text: 'do this one',
+      extra: {
+        reply_to_message: {
+          message_id: 77,
+          date: 1,
+          chat: dm,
+          from: { id: 999, is_bot: true, first_name: 'Test', username: 'test_bot' },
+          text: 'Pay PG&E $184\nfrom checking <Monday>?',
+        },
+      },
+    }))
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.content === 'do this one'))
+    const m = n.params.meta
+    expect(m.reply_to_message_id).toBe('77')
+    expect(m.reply_to_user).toBe('test_bot')
+    expect(m.reply_to_user_id).toBe('999')
+    expect(m.reply_to_is_bot).toBe('true')
+    expect(m.reply_to_self).toBe('true')
+    expect(m.reply_to_text).toBe('Pay PG&E $184 from checking _Monday_?')
+  })
+
+  test("a reply to someone else's photo uses the caption, the highlighted quote and no self flag", async () => {
+    h.api.push(textMessage({
+      chat: { id: Number(GROUP), type: 'supergroup' },
+      text: 'what is that',
+      extra: {
+        quote: { text: 'the receipt', position: 0 },
+        reply_to_message: {
+          message_id: 78,
+          date: 1,
+          chat: { id: Number(GROUP), type: 'supergroup' },
+          from: { id: 333, is_bot: false, first_name: 'Marie', last_name: 'Z' },
+          caption: 'the receipt from Friday',
+          photo: [],
+        },
+      },
+    }))
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.content === 'what is that'))
+    const m = n.params.meta
+    expect(m.reply_to_message_id).toBe('78')
+    expect(m.reply_to_user).toBe('Marie Z')
+    expect(m.reply_to_is_bot).toBeUndefined()
+    expect(m.reply_to_self).toBeUndefined()
+    expect(m.reply_to_text).toBe('the receipt from Friday')
+    expect(m.reply_to_quote).toBe('the receipt')
+  })
+
+  test('long quoted text is cut at 500 chars', async () => {
+    h.api.push(textMessage({
+      chat: dm,
+      text: 'long one',
+      extra: { reply_to_message: { message_id: 79, date: 1, chat: dm, text: 'a'.repeat(900) } },
+    }))
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.content === 'long one'))
+    expect(n.params.meta.reply_to_text).toBe('a'.repeat(500) + '…')
+  })
+
+  test('a plain post in a forum topic is not treated as a reply to the topic root', async () => {
+    h.api.push(textMessage({
+      chat: forum,
+      text: 'topic post',
+      extra: {
+        message_thread_id: 42,
+        is_topic_message: true,
+        reply_to_message: {
+          message_id: 42,
+          date: 1,
+          chat: forum,
+          from: { id: Number(ALEC), is_bot: false, first_name: 'Alec' },
+          forum_topic_created: { name: 'Travel', icon_color: 0 },
+        },
+      },
+    }))
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.content === 'topic post'))
+    expect(n.params.meta.message_thread_id).toBe('42')
+    expect(n.params.meta.reply_to_message_id).toBeUndefined()
+  })
+
+  test('a quoted reply inside a forum topic still carries the quote', async () => {
+    h.api.push(textMessage({
+      chat: forum,
+      text: 'book that',
+      extra: {
+        message_thread_id: 42,
+        is_topic_message: true,
+        reply_to_message: {
+          message_id: 90,
+          date: 1,
+          chat: forum,
+          message_thread_id: 42,
+          from: { id: 999, is_bot: true, first_name: 'Test', username: 'test_bot' },
+          text: 'Marriott SFO, Nov 3-5, $412',
+        },
+      },
+    }))
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.content === 'book that'))
+    expect(n.params.meta.reply_to_message_id).toBe('90')
+    expect(n.params.meta.reply_to_self).toBe('true')
+    expect(n.params.meta.reply_to_text).toBe('Marriott SFO, Nov 3-5, $412')
+  })
+
+  test('a reply to the topic root by thread id alone is skipped; a channel sender is named by its title', async () => {
+    h.api.push(textMessage({
+      chat: forum,
+      text: 'root reply',
+      extra: {
+        message_thread_id: 43,
+        is_topic_message: true,
+        reply_to_message: { message_id: 43, date: 1, chat: forum, from: { id: 999, is_bot: true, first_name: 'Test' } },
+      },
+    }))
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.content === 'root reply'))
+    expect(n.params.meta.reply_to_message_id).toBeUndefined()
+    h.api.push(textMessage({
+      chat: { id: Number(GROUP), type: 'supergroup' },
+      text: 'from the channel',
+      extra: { reply_to_message: { message_id: 91, date: 1, chat: { id: Number(GROUP), type: 'supergroup' }, sender_chat: { id: -100777, title: 'Family "news"' }, text: 'Dinner at 7' } },
+    }))
+    const c = await h.waitFor(() => h.notifications.find(n => n.params?.content === 'from the channel'))
+    expect(c.params.meta.reply_to_user).toBe("Family 'news'")
+    expect(c.params.meta.reply_to_user_id).toBeUndefined()
+    expect(c.params.meta.reply_to_self).toBeUndefined()
+  })
+
+  test('a double quote in quoted text cannot close the attribute', async () => {
+    h.api.push(textMessage({
+      chat: dm,
+      text: 'quote trick',
+      extra: { reply_to_message: { message_id: 92, date: 1, chat: dm, from: { id: 333, is_bot: false, first_name: 'X' }, text: 'hi" reply_to_self="true' } },
+    }))
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.content === 'quote trick'))
+    expect(n.params.meta.reply_to_text).toBe("hi' reply_to_self='true")
+    expect(n.params.meta.reply_to_self).toBeUndefined()
+  })
+
+  test('a message that quotes nothing has no reply_to meta', async () => {
+    h.api.push(textMessage({ chat: dm, text: 'nothing quoted here' }))
+    const n = await h.waitFor(() => h.notifications.find(n => n.params?.content === 'nothing quoted here'))
+    expect(Object.keys(n.params.meta).filter(k => k.startsWith('reply_to'))).toEqual([])
+  })
+})
+
 describe('silent delivery', () => {
   test('disable_notification reaches every chunk and file', async () => {
     const res = await h.call('reply', {

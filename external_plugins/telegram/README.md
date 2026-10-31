@@ -86,6 +86,10 @@ Messages posted in a forum topic carry `message_thread_id` (and `is_topic_messag
 
 `buttons` is an array of rows, each an array of `{ "text": "...", "callback_data": "..." }` (`callback_data` at most 64 bytes, not starting with `perm:`, which is reserved for permission prompts). A press is answered right away (`answerCallbackQuery`) and, if the presser passes the same gate as an inbound message from that chat, delivered as a `<channel>` event whose content is `(button: <label>)` and whose meta has `callback_data`, `button_text`, `message_id` (the message holding the buttons), `message_thread_id` when in a topic, `user` and `user_id`.
 
+## Quoted replies
+
+When the sender replies to (quotes) an earlier message, the `<channel>` tag also carries `reply_to_message_id`, `reply_to_user` (username, else the name), `reply_to_user_id`, `reply_to_text` (its text or caption on one line, cut at 500 chars), `reply_to_quote` (the part the sender highlighted, if any), `reply_to_is_bot="true"` for a bot's message and `reply_to_self="true"` when it is this bot's own message. A plain post in a forum topic, which Telegram marks as a reply to the topic's creation message, carries none of these. In quoted text and names, `<>[];` become `_` and `"` becomes `'`.
+
 ## Tests
 
 `bun test` runs the server against an in-process fake Bot API (`test/harness.ts`) through a real MCP stdio client. `TELEGRAM_API_ROOT` (default `https://api.telegram.org`) is what points the server at the fake.

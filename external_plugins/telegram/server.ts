@@ -497,7 +497,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
       '',
-      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. Messages posted in a forum topic also carry message_thread_id (and is_topic_message="true"); pass message_thread_id back to reply so the answer lands in the same topic. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
+      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. Messages posted in a forum topic also carry message_thread_id (and is_topic_message="true"); pass message_thread_id back to reply so the answer lands in the same topic. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. If the sender replied to (quoted) an earlier message, the tag also carries reply_to_message_id, reply_to_user, reply_to_text (the quoted message\'s text or caption, cut at 500 chars), reply_to_quote (the part they highlighted, if any), reply_to_is_bot and reply_to_self="true" when the quoted message is one of yours: read "this" or "that" in their message as that quoted message. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
       'reply accepts buttons (rows of {text, callback_data}) to show an inline keyboard. A press arrives as a <channel> message with callback_data, message_id (the message holding the buttons) and, in a topic, message_thread_id; the press is acknowledged for you. To show the outcome, edit_message the message (edit without buttons removes them).',
       '',
@@ -1168,6 +1168,60 @@ function safeName(s: string | undefined): string | undefined {
   return s?.replace(/[<>\[\]\r\n;]/g, '_')
 }
 
+// Quoted text is sender- or bot-controlled and lands in a <channel> attribute:
+// strip the delimiter chars safeName strips, turn " into ' so it cannot close the
+// attribute and fake reply_to_self, fold line breaks into spaces, cap it.
+const QUOTE_MAX = 500
+function quoteText(s: string | undefined): string | undefined {
+  if (!s) return undefined
+  const flat = s.replace(/[\r\n\t]+/g, ' ').replace(/[<>\[\];]/g, '_').replace(/"/g, "'").trim()
+  if (!flat) return undefined
+  return flat.length > QUOTE_MAX ? `${flat.slice(0, QUOTE_MAX)}…` : flat
+}
+
+type ReplyTo = {
+  message_id: number
+  from?: { id: number; is_bot: boolean; first_name?: string; last_name?: string; username?: string }
+  sender_chat?: { id: number; title?: string }
+  text?: string
+  caption?: string
+  forum_topic_created?: unknown
+}
+
+// When the sender replies to (quotes) an earlier message, pass that message's
+// id, sender and text so the session can resolve "this" / "that". In a forum
+// topic Telegram also sets reply_to_message on every plain post, pointing at
+// the topic's creation message; that is not a reply and is skipped. (In a
+// non-forum group message_thread_id is a reply chain's root, a real quote.)
+function replyMeta(
+  msg: {
+    reply_to_message?: ReplyTo
+    quote?: { text?: string }
+    message_thread_id?: number
+    is_topic_message?: boolean
+  } | undefined,
+  botId: number | undefined,
+): Record<string, string> {
+  const r = msg?.reply_to_message
+  if (!r) return {}
+  if (r.forum_topic_created != null) return {}
+  if (msg?.is_topic_message && r.message_id === msg.message_thread_id) return {}
+  const name = r.from
+    ? r.from.username ?? [r.from.first_name, r.from.last_name].filter(Boolean).join(' ')
+    : r.sender_chat?.title
+  const text = quoteText(r.text ?? r.caption)
+  const part = quoteText(msg?.quote?.text)
+  return {
+    reply_to_message_id: String(r.message_id),
+    ...(name ? { reply_to_user: quoteText(name)! } : {}),
+    ...(r.from ? { reply_to_user_id: String(r.from.id) } : {}),
+    ...(r.from?.is_bot ? { reply_to_is_bot: 'true' } : {}),
+    ...(r.from && botId != null && r.from.id === botId ? { reply_to_self: 'true' } : {}),
+    ...(text ? { reply_to_text: text } : {}),
+    ...(part ? { reply_to_quote: part } : {}),
+  }
+}
+
 async function handleInbound(
   ctx: Context,
   text: string,
@@ -1248,6 +1302,7 @@ async function handleInbound(
         user: from.username ?? String(from.id),
         user_id: String(from.id),
         ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
+        ...replyMeta(ctx.message as Parameters<typeof replyMeta>[0], ctx.me?.id),
         ...(imagePath ? { image_path: imagePath } : {}),
         ...(attachment ? {
           attachment_kind: attachment.kind,
