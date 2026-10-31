@@ -88,7 +88,7 @@ Messages posted in a forum topic carry `message_thread_id` (and `is_topic_messag
 
 ## Quoted replies
 
-When the sender replies to (quotes) an earlier message, the `<channel>` tag also carries `reply_to_message_id`, `reply_to_user` (username, else the name), `reply_to_user_id`, `reply_to_text` (its text or caption on one line, cut at 500 chars), `reply_to_quote` (the part the sender highlighted, if any), `reply_to_is_bot="true"` for a bot's message and `reply_to_self="true"` when it is this bot's own message. A plain post in a forum topic, which Telegram marks as a reply to the topic's creation message, carries none of these. The `<>[];` characters in quoted text become `_`.
+When the sender replies to (quotes) an earlier message, the `<channel>` tag also carries `reply_to_message_id`, `reply_to_user` (username, else the name), `reply_to_user_id`, `reply_to_text` (its text or caption on one line, cut at 500 chars), `reply_to_quote` (the part the sender highlighted, if any), `reply_to_is_bot="true"` for a bot's message and `reply_to_self="true"` when it is this bot's own message. A plain post in a forum topic, which Telegram marks as a reply to the topic's creation message, carries none of these. In quoted text and names, `<>[];` become `_` and `"` becomes `'`.
 
 ## Tests
 

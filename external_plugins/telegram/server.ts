@@ -1169,11 +1169,12 @@ function safeName(s: string | undefined): string | undefined {
 }
 
 // Quoted text is sender- or bot-controlled and lands in a <channel> attribute:
-// strip the delimiter chars safeName strips, fold line breaks into spaces, cap it.
+// strip the delimiter chars safeName strips, turn " into ' so it cannot close the
+// attribute and fake reply_to_self, fold line breaks into spaces, cap it.
 const QUOTE_MAX = 500
 function quoteText(s: string | undefined): string | undefined {
   if (!s) return undefined
-  const flat = s.replace(/[\r\n\t]+/g, ' ').replace(/[<>\[\];]/g, '_').trim()
+  const flat = s.replace(/[\r\n\t]+/g, ' ').replace(/[<>\[\];]/g, '_').replace(/"/g, "'").trim()
   if (!flat) return undefined
   return flat.length > QUOTE_MAX ? `${flat.slice(0, QUOTE_MAX)}…` : flat
 }
@@ -1212,7 +1213,7 @@ function replyMeta(
   const part = quoteText(msg?.quote?.text)
   return {
     reply_to_message_id: String(r.message_id),
-    ...(name ? { reply_to_user: safeName(name)! } : {}),
+    ...(name ? { reply_to_user: quoteText(name)! } : {}),
     ...(r.from ? { reply_to_user_id: String(r.from.id) } : {}),
     ...(r.from?.is_bot ? { reply_to_is_bot: 'true' } : {}),
     ...(r.from && botId != null && r.from.id === botId ? { reply_to_self: 'true' } : {}),
